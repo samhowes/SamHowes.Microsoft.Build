@@ -39,6 +39,8 @@ namespace Converter
             processor.Publicize();
             processor.SetPackageId();
             await processor.UpdateTranslator();
+            await processor.UpdateBuildManager();
+            await processor.UpdateResultsCache();
             processor.SetVersion("16.9.0");
         }
     }
@@ -183,45 +185,54 @@ namespace Converter
                 .DescendantNodes().OfType<ClassDeclarationSyntax>()
                 .ToList();
 
-            var reader = classes[0];
-            var writer = classes[1];
+            var cls = classes[1];
 
-            CustomizeTranslator<BinaryReader>(reader, "reader");
-            CustomizeTranslator<BinaryWriter>(writer, "writer");
-            
-            void CustomizeTranslator<TParameter>(SyntaxNode cls, string parameterName)
+            editor.SetAccessibility(cls, Accessibility.Public);
+            var ctor = cls.ChildNodes().OfType<ConstructorDeclarationSyntax>().First();
+            var props = new SyntaxNode[]
             {
-                editor.SetAccessibility(cls, Accessibility.Public);
-                var ctor = cls.ChildNodes().OfType<ConstructorDeclarationSyntax>().First();
-
-                editor.AddParameter(ctor, SyntaxFactory.Parameter(
-                    default, default, SyntaxFactory.ParseTypeName(typeof(TParameter).Name), 
-                    SyntaxFactory.Identifier(parameterName), 
-                    SyntaxFactory.EqualsValueClause(
-                        SyntaxFactory.LiteralExpression(SyntaxKind.NullLiteralExpression))));
+                SyntaxFactory.PropertyDeclaration(
+                        SyntaxFactory.ParseTypeName("Func<Stream, BinaryWriter>"), "BinaryWriterFactory")
+                    .AddModifiers(
+                        SyntaxFactory.Token(SyntaxKind.PublicKeyword), 
+                        SyntaxFactory.Token(SyntaxKind.StaticKeyword))
+                    .AddAccessorListAccessors(
+                        SyntaxFactory.AccessorDeclaration(SyntaxKind.GetAccessorDeclaration)
+                            .WithSemicolonToken(SyntaxFactory.Token(SyntaxKind.SemicolonToken)),
+                        SyntaxFactory.AccessorDeclaration(SyntaxKind.SetAccessorDeclaration)
+                            .WithSemicolonToken(SyntaxFactory.Token(SyntaxKind.SemicolonToken)))
+                    .NormalizeWhitespace(indentation: "    ", eol: "\n")
+            };
             
-                editor.ReplaceNode(ctor.Body.Statements.Last(), (n, g) =>
-                {
-                    var e = (ExpressionStatementSyntax) n;
-                    var ass = (AssignmentExpressionSyntax) e.Expression;
-                
-                    StatementSyntax what = SyntaxFactory.ParseStatement($"{ass.Left.ToString()} = {parameterName} ?? {ass.Right.ToString()};");
-                
-                    return what;
-                });    
-            }
+            editor.InsertBefore(ctor, props);
+
+            var param = ctor.ParameterList.Parameters.First();
+            editor.ReplaceNode(ctor.Body!.Statements.Last(), (n, g) =>
+            {
+                var e = (ExpressionStatementSyntax) n;
+                var ass = (AssignmentExpressionSyntax) e.Expression;
+            
+                StatementSyntax what = SyntaxFactory.ParseStatement(
+                    $"{ass.Left.ToString()} = BinaryWriterFactory({param.Identifier.Value});");
+            
+                return what;
+            });
+            
             
             
             await Write(editor, path);
         }
 
-        private async Task CustomizeReader(Editor? wrapper)
+        private async Task CustomizeReader(Editor wrapper)
         {
             var path = Path.Combine(_sharedRoot, "InterningBinaryReader.cs");
             var (root, editor) = await wrapper.LoadDocument(path);
 
             var cls = root!.DescendantNodes()
                 .First(n => n is ClassDeclarationSyntax {Identifier: {Text: "InterningBinaryReader"}});
+
+            foreach (var childClass in cls.DescendantNodes().OfType<ClassDeclarationSyntax>())
+                editor.SetAccessibility(childClass, Accessibility.Public);
 
             var patch = CSharpSyntaxTree.ParseText(
                 await File.ReadAllTextAsync(Path.Combine(_repoRoot, "InterningBinaryReader.patch.cs")));
@@ -236,7 +247,9 @@ namespace Converter
             {
                 SyntaxFactory.PropertyDeclaration(
                         SyntaxFactory.ParseTypeName(patchType.Identifier.Text), "OpportunisticIntern")
-                    .AddModifiers(SyntaxFactory.Token(SyntaxKind.PublicKeyword))
+                    .AddModifiers(
+                        SyntaxFactory.Token(SyntaxKind.PublicKeyword), 
+                        SyntaxFactory.Token(SyntaxKind.StaticKeyword))
                     .AddAccessorListAccessors(
                         SyntaxFactory.AccessorDeclaration(SyntaxKind.GetAccessorDeclaration)
                             .WithSemicolonToken(SyntaxFactory.Token(SyntaxKind.SemicolonToken)),
@@ -253,7 +266,7 @@ namespace Converter
             await Write(editor, path);
         }
 
-        private static async Task Write(DocumentEditor? editor, string? path)
+        private static async Task Write(DocumentEditor editor, string path)
         {
             var document = await Formatter.FormatAsync(editor.GetChangedDocument());
             // var text = editor.GetChangedRoot().ToFullString();
@@ -269,6 +282,150 @@ namespace Converter
             var versionPrefix = versionsProps!.Properties.First(p => p.Name == "VersionPrefix");
             versionPrefix.Value = version;
             versionsProps.Save(path);
+        }
+
+        public async Task UpdateBuildManager()
+        {
+            var wrapper = new Editor();
+            var path = Path.Combine(_frameworkRoot, "BackEnd/BuildManager/BuildManager.cs");
+            var (root, editor) = await wrapper.LoadDocument(path);
+        
+            var cls = root!.DescendantNodes()
+                .First(n => n is ClassDeclarationSyntax {Identifier: {Text: "BuildManager"}});
+
+            foreach (var method in cls.DescendantNodes()
+                .OfType<MethodDeclarationSyntax>()
+                .Where(m => m.Identifier.Text == "GetNewConfigurationId"))
+                editor.SetAccessibility(method, Accessibility.Public);
+
+            var reuseOldCaches = cls.DescendantNodes()
+                .OfType<MethodDeclarationSyntax>()
+                .Single(m => m.Identifier.Text == "ReuseOldCaches");
+
+            var newMethod = SyntaxFactory.ParseMemberDeclaration(@"
+        public void ReuseOldCaches(IConfigCache configCache, IResultsCache resultsCache)
+        {
+            _componentFactories.ReplaceFactory(BuildComponentType.ConfigCache, configCache);
+            _componentFactories.ReplaceFactory(BuildComponentType.ResultsCache, resultsCache);
+        }
+");
+            editor.InsertAfter(reuseOldCaches, newMethod!);
+            await Write(editor, path);
+        }
+
+        public async Task UpdateResultsCache()
+        {
+            // await UpdateResultsCacheOverride();
+            
+            // await UpdateCacheAggregator();
+            foreach (var (shortPath, methodNames, fieldNames) in new[]
+            {
+                ("BackEnd/Components/Caching/ResultsCache.cs", new []{"ClearResultsForConfiguration"},
+                    new string[]
+                    {
+                        // "_resultsByConfiguration"
+                    }),
+                // ("BackEnd/Shared/BuildResult.cs", new[] {("MergeResults"), "AddResultsForTarget"}, new []{"_resultsByTarget", "_requestException"})
+            })
+            {
+                var wrapper = new Editor();
+                var path = Path.Combine(_frameworkRoot, shortPath);
+                var (root, editor) = await wrapper.LoadDocument(path);
+
+                var className = Path.GetFileNameWithoutExtension(shortPath);
+                var cls = root!.DescendantNodes()
+                    .OfType<ClassDeclarationSyntax>()
+                    .Single(c => c.Identifier.Text == className);
+
+                foreach (var methodName in methodNames)
+                {
+                    var configurationId = cls.DescendantNodes()
+                        .Single(n => n is MethodDeclarationSyntax m && m.Identifier.Text == methodName);
+            
+                    editor.SetModifiers(configurationId, DeclarationModifiers.Virtual);    
+                }
+
+                foreach (var fieldName in fieldNames)
+                {
+                    var resultsByTarget = cls.DescendantNodes()
+                        .Single(c => c is FieldDeclarationSyntax f &&
+                                     f.Declaration.Variables.Any(v => v.Identifier.Text == fieldName));
+                    editor.SetAccessibility(resultsByTarget, Accessibility.Public);
+                }
+                
+                await Write(editor, path);   
+            }
+        }
+
+        private async Task UpdateCacheAggregator()
+        {
+            var path = Path.Combine(_frameworkRoot, "BackEnd/BuildManager/CacheAggregator.cs");
+
+            // The cache aggregator operates on the same assumption, it will be true on the aggregate, but not on 
+            // the individual caches.
+            var regex = new Regex(@"^[ ]+ErrorUtilities.VerifyThrow.*Assuming 1-to-1 mapping between configs and results",
+                RegexOptions.IgnoreCase | RegexOptions.Multiline);
+
+            var replaced = regex.Replace(await File.ReadAllTextAsync(path), "//$0");
+            await File.WriteAllTextAsync(path, replaced);
+
+            var wrapper = new Editor();
+            var (root, editor) = await wrapper.LoadDocument(path);
+            var insertCachesMethod = root.DescendantNodes()
+                .Single(n => n is MethodDeclarationSyntax {Identifier: {Text: "InsertCaches"}});
+
+            var variables = insertCachesMethod.DescendantNodes()
+                .OfType<VariableDeclarationSyntax>()
+                .ToList();
+
+            var index = -1;
+            for (var i = 0; i < variables.Count; i++)
+            {
+                var actual = variables[i];
+                if (actual.Variables.All(v => v.Identifier.Text != "seenConfigIds")) continue;
+                index = i;
+                break;
+            }
+
+            if (index < 0) throw new Exception(":(");
+
+            var seenConfigs = variables[index];
+            var configIdMapping = variables[index + 1];
+
+            var ctor = root.DescendantNodes()
+                .OfType<ConstructorDeclarationSyntax>()
+                .Single(c => c.Identifier.Text == "CacheAggregator");
+
+            var lastBody = ctor.Body!.Statements.Last();
+            foreach (var variableDeclaration in new[] {seenConfigs, configIdMapping})
+            {
+                editor.RemoveNode(variableDeclaration.Parent!);
+                var variable = variableDeclaration.Variables.Single();
+                var type = ((ObjectCreationExpressionSyntax) variable.Initializer!.Value).Type;
+                var field = SyntaxFactory.ParseMemberDeclaration(
+                    $"public static {type} {variable.Identifier.Text};\n");
+
+                editor.InsertBefore(ctor, field!);
+
+                var assignment = SyntaxFactory.ParseStatement(variable.GetText().ToString() + ";\n");
+
+                editor.InsertAfter(lastBody, assignment);
+            }
+
+            await Write(editor, path);
+        }
+
+        private async Task UpdateResultsCacheOverride()
+        {
+            // this file does a verification of the overridden cache to make sure it doesn't overlap with the current
+            // results, we're fine with this. This is only active in debug mode anyways
+            var path = Path.Combine(_frameworkRoot, "BackEnd/Components/Caching/ResultsCacheWithOverride.cs");
+
+            var regex = new Regex(@"^#if\s\w+\s+ErrorUtilities.VerifyThrow.*?caches.*?overlap.*?;\s+#endif",
+                RegexOptions.Singleline | RegexOptions.IgnoreCase | RegexOptions.Multiline);
+
+            var replaced = regex.Replace(await File.ReadAllTextAsync(path), "");
+            await File.WriteAllTextAsync(path, replaced);
         }
     }
 
