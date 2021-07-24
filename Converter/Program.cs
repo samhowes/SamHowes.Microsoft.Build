@@ -217,9 +217,6 @@ namespace Converter
             
                 return what;
             });
-            
-            
-            
             await Write(editor, path);
         }
 
@@ -269,7 +266,6 @@ namespace Converter
         private static async Task Write(DocumentEditor editor, string path)
         {
             var document = await Formatter.FormatAsync(editor.GetChangedDocument());
-            // var text = editor.GetChangedRoot().ToFullString();
             var text = await document.GetTextAsync();
             await File.WriteAllTextAsync(path, text.ToString());
         }
@@ -315,17 +311,9 @@ namespace Converter
 
         public async Task UpdateResultsCache()
         {
-            // await UpdateResultsCacheOverride();
-            
-            // await UpdateCacheAggregator();
-            foreach (var (shortPath, methodNames, fieldNames) in new[]
+            foreach (var (shortPath, methodNames) in new[]
             {
-                ("BackEnd/Components/Caching/ResultsCache.cs", new []{"ClearResultsForConfiguration"},
-                    new string[]
-                    {
-                        // "_resultsByConfiguration"
-                    }),
-                // ("BackEnd/Shared/BuildResult.cs", new[] {("MergeResults"), "AddResultsForTarget"}, new []{"_resultsByTarget", "_requestException"})
+                ("BackEnd/Components/Caching/ResultsCache.cs", new []{"ClearResultsForConfiguration"}),
             })
             {
                 var wrapper = new Editor();
@@ -345,87 +333,8 @@ namespace Converter
                     editor.SetModifiers(configurationId, DeclarationModifiers.Virtual);    
                 }
 
-                foreach (var fieldName in fieldNames)
-                {
-                    var resultsByTarget = cls.DescendantNodes()
-                        .Single(c => c is FieldDeclarationSyntax f &&
-                                     f.Declaration.Variables.Any(v => v.Identifier.Text == fieldName));
-                    editor.SetAccessibility(resultsByTarget, Accessibility.Public);
-                }
-                
                 await Write(editor, path);   
             }
-        }
-
-        private async Task UpdateCacheAggregator()
-        {
-            var path = Path.Combine(_frameworkRoot, "BackEnd/BuildManager/CacheAggregator.cs");
-
-            // The cache aggregator operates on the same assumption, it will be true on the aggregate, but not on 
-            // the individual caches.
-            var regex = new Regex(@"^[ ]+ErrorUtilities.VerifyThrow.*Assuming 1-to-1 mapping between configs and results",
-                RegexOptions.IgnoreCase | RegexOptions.Multiline);
-
-            var replaced = regex.Replace(await File.ReadAllTextAsync(path), "//$0");
-            await File.WriteAllTextAsync(path, replaced);
-
-            var wrapper = new Editor();
-            var (root, editor) = await wrapper.LoadDocument(path);
-            var insertCachesMethod = root.DescendantNodes()
-                .Single(n => n is MethodDeclarationSyntax {Identifier: {Text: "InsertCaches"}});
-
-            var variables = insertCachesMethod.DescendantNodes()
-                .OfType<VariableDeclarationSyntax>()
-                .ToList();
-
-            var index = -1;
-            for (var i = 0; i < variables.Count; i++)
-            {
-                var actual = variables[i];
-                if (actual.Variables.All(v => v.Identifier.Text != "seenConfigIds")) continue;
-                index = i;
-                break;
-            }
-
-            if (index < 0) throw new Exception(":(");
-
-            var seenConfigs = variables[index];
-            var configIdMapping = variables[index + 1];
-
-            var ctor = root.DescendantNodes()
-                .OfType<ConstructorDeclarationSyntax>()
-                .Single(c => c.Identifier.Text == "CacheAggregator");
-
-            var lastBody = ctor.Body!.Statements.Last();
-            foreach (var variableDeclaration in new[] {seenConfigs, configIdMapping})
-            {
-                editor.RemoveNode(variableDeclaration.Parent!);
-                var variable = variableDeclaration.Variables.Single();
-                var type = ((ObjectCreationExpressionSyntax) variable.Initializer!.Value).Type;
-                var field = SyntaxFactory.ParseMemberDeclaration(
-                    $"public static {type} {variable.Identifier.Text};\n");
-
-                editor.InsertBefore(ctor, field!);
-
-                var assignment = SyntaxFactory.ParseStatement(variable.GetText().ToString() + ";\n");
-
-                editor.InsertAfter(lastBody, assignment);
-            }
-
-            await Write(editor, path);
-        }
-
-        private async Task UpdateResultsCacheOverride()
-        {
-            // this file does a verification of the overridden cache to make sure it doesn't overlap with the current
-            // results, we're fine with this. This is only active in debug mode anyways
-            var path = Path.Combine(_frameworkRoot, "BackEnd/Components/Caching/ResultsCacheWithOverride.cs");
-
-            var regex = new Regex(@"^#if\s\w+\s+ErrorUtilities.VerifyThrow.*?caches.*?overlap.*?;\s+#endif",
-                RegexOptions.Singleline | RegexOptions.IgnoreCase | RegexOptions.Multiline);
-
-            var replaced = regex.Replace(await File.ReadAllTextAsync(path), "");
-            await File.WriteAllTextAsync(path, replaced);
         }
     }
 
