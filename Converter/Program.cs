@@ -37,7 +37,7 @@ namespace Converter
             if (!Directory.Exists(sourceRoot))
                 Die("Can't find msbuild directory");
 
-            Directory.SetCurrentDirectory(currentDirectory);
+            Directory.SetCurrentDirectory(sourceRoot);
             var processor = new Processor(repoRoot, sourceRoot, new Files());
             processor.Publicize();
             Commit("Make methods public instead of internal");
@@ -66,10 +66,11 @@ namespace Converter
 
         public static void Git(params string[] args)
         {
+            var arguments = string.Join(" ", args);
             var process = Process.Start("git", string.Join(" ", args));
             process.WaitForExit();
             if (process.ExitCode != 0)
-                throw new Exception("Failed to run git");
+                throw new Exception($"Failed to run git {arguments}");
         }
     }
 
