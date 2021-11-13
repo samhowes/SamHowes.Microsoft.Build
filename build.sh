@@ -2,23 +2,13 @@
 
 set -e
 
-
-msbuild_root="$(realpath "$(pwd)/../msbuild")"
-pushd "$msbuild_root"
-git reset --hard
-popd
-
-if [[ -n "${1:-}" ]]; then
-    exit
-fi
-
 pushd Converter
 dotnet run
 popd
 
-pushd "$msbuild_root"
-proj="$msbuild_root/src/Build/Microsoft.Build.csproj"
+pushd _work/msbuild
+proj="$(pwd)/src/Build/Microsoft.Build.csproj"
 
-./build.sh -pack -projects "$proj" 
+./build.sh -pack -projects "$proj" -configuration Release
 
 rm -rf ~/.nuget/packages/samhowes.microsoft.build 

@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Text;
@@ -14,6 +15,7 @@ using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.CodeAnalysis.Formatting;
 using Microsoft.CodeAnalysis.Text;
 using Project = Microsoft.CodeAnalysis.Project;
+using static Converter.MyLog;
 
 namespace Converter
 {
@@ -24,24 +26,50 @@ namespace Converter
             string? currentDirectory = Directory.GetCurrentDirectory();
             while (true)
             {
-                if (Directory.Exists(Path.Combine(currentDirectory, ".git"))) break;
+                if (Directory.Exists(Path.Combine(currentDirectory!, ".git"))) break;
                 currentDirectory = Path.GetDirectoryName(currentDirectory);
                 if (currentDirectory == null)
-                {
-                    Console.Error.WriteLine($"Failed to find repository root.");
-                    return;
-                }
+                    Die($"Failed to find repository root.");
             }
 
             var repoRoot = currentDirectory!;
-            var sourceRoot = Path.GetFullPath(Path.Combine(repoRoot, "..", "msbuild"));
+            var sourceRoot = Path.GetFullPath(Path.Combine(repoRoot, "_work", "msbuild"));
+            if (!Directory.Exists(sourceRoot))
+                Die("Can't find msbuild directory");
+
+            Directory.SetCurrentDirectory(currentDirectory);
             var processor = new Processor(repoRoot, sourceRoot, new Files());
             processor.Publicize();
+            Commit("Make methods public instead of internal");
+
             processor.SetPackageId();
+            Commit("Set Package Id");
+
             await processor.UpdateTranslator();
+            Commit("Update binary translation for string interning");
+
             await processor.UpdateBuildManager();
+            Commit("Update the BuildManager to use our caches");
+
             await processor.UpdateResultsCache();
+            Commit("Allow overriding of methods in the results cache");
+
             processor.SetVersion("16.9.0");
+            Commit("Set our version number");
+        }
+
+        public static void Commit(string message)
+        {
+            Git("add .");
+            Git($"commit -m \"{message}\"");
+        }
+
+        public static void Git(params string[] args)
+        {
+            var process = Process.Start("git", string.Join(" ", args));
+            process.WaitForExit();
+            if (process.ExitCode != 0)
+                throw new Exception("Failed to run git");
         }
     }
 
@@ -52,7 +80,7 @@ namespace Converter
         public virtual IEnumerable<string> GetFiles(string path) => Directory.EnumerateFiles(path);
         public virtual IEnumerable<string> GetDirectories(string path) => Directory.EnumerateDirectories(path);
     }
-    
+
     public class Processor
     {
         private readonly string _repoRoot;
@@ -74,16 +102,17 @@ namespace Converter
 
         public void Publicize()
         {
-            var targetDirectories = new[] {_frameworkRoot, _sharedRoot};
+            var targetDirectories = new[] { _frameworkRoot, _sharedRoot };
 
             bool replaced = false;
+
             string MakePublic(Match match)
             {
                 replaced = true;
                 var res = new StringBuilder();
                 res.Append(match.Groups["indent"].Value);
-                
-                
+
+
                 // don't return `public <PropertyName> {get; public set}`
                 var accessor = match.Groups["accessor"];
                 if (accessor.Success)
@@ -92,12 +121,11 @@ namespace Converter
                 }
                 else
                 {
-                    
                     var modifier = match.Groups["modifier"];
                     // don't return `protected public`
                     if (modifier.Success && modifier.Value.Trim() != "protected")
                         res.Append(modifier);
-                    
+
                     res.Append("public");
                     res.Append(match.Groups["suffix"]);
                 }
@@ -110,13 +138,14 @@ namespace Converter
                 replaced = true;
                 return match.Value + $" | {match.Groups["qualifier"]}BindingFlags.Public";
             }
-            
+
             var flags = RegexOptions.Compiled | RegexOptions.Multiline | RegexOptions.IgnoreCase;
-            var regexes = new []
+            var regexes = new[]
             {
                 (new Regex(@"^(?<indent>\s+)(?<modifier>(static|sealed|abstract|protected)\s)?internal(?<suffix>\s)(?<accessor>set)?", flags),
-                    (MatchEvaluator) MakePublic),
-                (new Regex(@"(?<qualifier>System.Reflection.)?BindingFlags.NonPublic", flags), (MatchEvaluator) SearchForPublic)
+                    (MatchEvaluator)MakePublic),
+                (new Regex(@"(?<qualifier>System.Reflection.)?BindingFlags.NonPublic", flags),
+                    (MatchEvaluator)SearchForPublic)
             };
 
             void Walk(string directory)
@@ -132,20 +161,21 @@ namespace Converter
                     {
                         contents = regex.Replace(contents, evaluator);
                     }
+
                     if (replaced)
                         _files.WriteContents(file, contents);
                 }
             }
 
-            foreach (var directory in targetDirectories)       
+            foreach (var directory in targetDirectories)
                 Walk(directory);
         }
 
         public void SetPackageId()
         {
-            var xml = ProjectRootElement.Open(Path.Combine(_frameworkRoot, "Microsoft.Build.csproj"), 
-                ProjectCollection.GlobalProjectCollection, 
-                preserveFormatting:true)!;
+            var xml = ProjectRootElement.Open(Path.Combine(_frameworkRoot, "Microsoft.Build.csproj"),
+                ProjectCollection.GlobalProjectCollection,
+                preserveFormatting: true)!;
             var group = xml.PropertyGroups.First();
 
             ProjectPropertyElement GetOrAddProperty(string name)
@@ -154,22 +184,23 @@ namespace Converter
                 if (property == null)
                 {
                     property = xml.CreatePropertyElement("PackageId");
-                    group!.AppendChild(property);                    
+                    group!.AppendChild(property);
                 }
+
                 return property;
             }
-            
+
             var noWarn = GetOrAddProperty("NoWarn");
             // warnings for naming things, CLS-compliance, and parameters in xml comments
             noWarn.Value = $"{noWarn.Value};CS3001;CS3002;CS3003;CS3005;CS3008;CS1573";
             GetOrAddProperty("PackageId").Value = "SamHowes.Microsoft.Build";
             xml.Save();
         }
-        
+
         public async Task UpdateTranslator()
         {
             var _ = typeof(Microsoft.CodeAnalysis.CSharp.Formatting.CSharpFormattingOptions);
-            
+
             var wrapper = new Editor();
             await CustomizeReader(wrapper);
             await CustomizeTranslator(wrapper);
@@ -194,7 +225,7 @@ namespace Converter
                 SyntaxFactory.PropertyDeclaration(
                         SyntaxFactory.ParseTypeName("Func<Stream, BinaryWriter>"), "BinaryWriterFactory")
                     .AddModifiers(
-                        SyntaxFactory.Token(SyntaxKind.PublicKeyword), 
+                        SyntaxFactory.Token(SyntaxKind.PublicKeyword),
                         SyntaxFactory.Token(SyntaxKind.StaticKeyword))
                     .AddAccessorListAccessors(
                         SyntaxFactory.AccessorDeclaration(SyntaxKind.GetAccessorDeclaration)
@@ -203,18 +234,18 @@ namespace Converter
                             .WithSemicolonToken(SyntaxFactory.Token(SyntaxKind.SemicolonToken)))
                     .NormalizeWhitespace(indentation: "    ", eol: "\n")
             };
-            
+
             editor.InsertBefore(ctor, props);
 
             var param = ctor.ParameterList.Parameters.First();
             editor.ReplaceNode(ctor.Body!.Statements.Last(), (n, g) =>
             {
-                var e = (ExpressionStatementSyntax) n;
-                var ass = (AssignmentExpressionSyntax) e.Expression;
-            
+                var e = (ExpressionStatementSyntax)n;
+                var ass = (AssignmentExpressionSyntax)e.Expression;
+
                 StatementSyntax what = SyntaxFactory.ParseStatement(
                     $"{ass.Left.ToString()} = BinaryWriterFactory({param.Identifier.Value});");
-            
+
                 return what;
             });
             await Write(editor, path);
@@ -226,7 +257,7 @@ namespace Converter
             var (root, editor) = await wrapper.LoadDocument(path);
 
             var cls = root!.DescendantNodes()
-                .First(n => n is ClassDeclarationSyntax {Identifier: {Text: "InterningBinaryReader"}});
+                .First(n => n is ClassDeclarationSyntax { Identifier: { Text: "InterningBinaryReader" } });
 
             foreach (var childClass in cls.DescendantNodes().OfType<ClassDeclarationSyntax>())
                 editor.SetAccessibility(childClass, Accessibility.Public);
@@ -245,7 +276,7 @@ namespace Converter
                 SyntaxFactory.PropertyDeclaration(
                         SyntaxFactory.ParseTypeName(patchType.Identifier.Text), "OpportunisticIntern")
                     .AddModifiers(
-                        SyntaxFactory.Token(SyntaxKind.PublicKeyword), 
+                        SyntaxFactory.Token(SyntaxKind.PublicKeyword),
                         SyntaxFactory.Token(SyntaxKind.StaticKeyword))
                     .AddAccessorListAccessors(
                         SyntaxFactory.AccessorDeclaration(SyntaxKind.GetAccessorDeclaration)
@@ -285,9 +316,9 @@ namespace Converter
             var wrapper = new Editor();
             var path = Path.Combine(_frameworkRoot, "BackEnd/BuildManager/BuildManager.cs");
             var (root, editor) = await wrapper.LoadDocument(path);
-        
+
             var cls = root!.DescendantNodes()
-                .First(n => n is ClassDeclarationSyntax {Identifier: {Text: "BuildManager"}});
+                .First(n => n is ClassDeclarationSyntax { Identifier: { Text: "BuildManager" } });
 
             foreach (var method in cls.DescendantNodes()
                 .OfType<MethodDeclarationSyntax>()
@@ -313,7 +344,7 @@ namespace Converter
         {
             foreach (var (shortPath, methodNames) in new[]
             {
-                ("BackEnd/Components/Caching/ResultsCache.cs", new []{"ClearResultsForConfiguration"}),
+                ("BackEnd/Components/Caching/ResultsCache.cs", new[] { "ClearResultsForConfiguration" }),
             })
             {
                 var wrapper = new Editor();
@@ -329,11 +360,11 @@ namespace Converter
                 {
                     var configurationId = cls.DescendantNodes()
                         .Single(n => n is MethodDeclarationSyntax m && m.Identifier.Text == methodName);
-            
-                    editor.SetModifiers(configurationId, DeclarationModifiers.Virtual);    
+
+                    editor.SetModifiers(configurationId, DeclarationModifiers.Virtual);
                 }
 
-                await Write(editor, path);   
+                await Write(editor, path);
             }
         }
     }
@@ -348,9 +379,9 @@ namespace Converter
             _workspace = new AdhocWorkspace();
             var projectId = ProjectId.CreateNewId();
             var versionStamp = VersionStamp.Create();
-            var projectInfo = ProjectInfo.Create(projectId, versionStamp, "NewProject", "projName", LanguageNames.CSharp);
+            var projectInfo =
+                ProjectInfo.Create(projectId, versionStamp, "NewProject", "projName", LanguageNames.CSharp);
             _newProject = _workspace.AddProject(projectInfo);
-            
         }
 
         public async Task<(SyntaxNode root, DocumentEditor editor)> LoadDocument(string path)
