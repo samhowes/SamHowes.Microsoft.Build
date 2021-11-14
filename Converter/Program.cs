@@ -54,8 +54,15 @@ namespace Converter
             await processor.UpdateResultsCache();
             Commit("Allow overriding of methods in the results cache");
 
-            processor.SetVersion("16.9.0");
-            Commit("Set our version number");
+            try
+            {
+                processor.SetVersion("17.0.0");
+                Commit("Set our version number");
+            }
+            catch
+            {
+                //ignored
+            }
         }
 
         public static void Commit(string message)
@@ -149,6 +156,19 @@ namespace Converter
                     (MatchEvaluator)SearchForPublic)
             };
 
+            var blockList = new HashSet<string>(new[]
+            {
+                "Shared/FileSystem/WindowsNative.cs",
+                "Shared/CommunicationsUtilities.cs",
+                "Shared/NativeMethodsShared.cs",
+                "Shared/NodeEndpointOutOfProcBase.cs",
+                "Build/BackEnd/Components/Communications/NodeProviderOutOfProcTaskHost.cs",
+                "Build/BackEnd/Components/Communications/NodeEndpointOutOfProc.cs",
+                "Build/BackEnd/Components/Communications/NodeProviderOutOfProc.cs",
+                "Build/BackEnd/Components/Communications/NodeProviderOutOfProcBase.cs",
+                "Build/BackEnd/Node/NativeMethods.cs",
+            }.Select(f => Path.Combine(_srcRoot, f)));
+
             void Walk(string directory)
             {
                 foreach (var subDirectory in _files.GetDirectories(directory))
@@ -156,6 +176,7 @@ namespace Converter
                 foreach (var file in _files.GetFiles(directory))
                 {
                     if (!file.EndsWith(".cs")) continue;
+                    if (blockList.Contains(file)) continue;
                     var contents = _files.GetContents(file);
                     replaced = false;
                     foreach (var (regex, evaluator) in regexes!)
@@ -192,8 +213,16 @@ namespace Converter
             }
 
             var noWarn = GetOrAddProperty("NoWarn");
-            // warnings for naming things, CLS-compliance, and parameters in xml comments
-            noWarn.Value = $"{noWarn.Value};CS3001;CS3002;CS3003;CS3005;CS3008;CS1573";
+
+            noWarn.Value = string.Join(";", new[]
+            {
+                noWarn.Value,
+                // warnings for naming things, CLS-compliance, and parameters in xml comments
+                "CS3001;CS3002;CS3003;CS3005;CS3008;CS1573",
+                // CLS-compliant field 'ProjectCacheService.DesignTimeBuildsDetected' cannot be volatile
+                // we're not doing designtime builds, and there is a todo in the code to remove this property anyways
+                "CS3026"
+            });
             GetOrAddProperty("PackageId").Value = "SamHowes.Microsoft.Build";
             xml.Save();
         }
@@ -272,10 +301,14 @@ namespace Converter
 
             var ctor = cls.ChildNodes().OfType<ConstructorDeclarationSyntax>().First();
 
+
+            // InterningBinaryReader uses a static reference to `Strings` in net6.0 (OpportunisticIntern in net5.0)
+            // Take advantage of this and create a static property named `Strings`. RulesMSBuild.Tools.Builder will
+            // set this property at runtime with a path-replacing string interner of our own making
             var props = new SyntaxNode[]
             {
                 SyntaxFactory.PropertyDeclaration(
-                        SyntaxFactory.ParseTypeName(patchType.Identifier.Text), "OpportunisticIntern")
+                        SyntaxFactory.ParseTypeName(patchType.Identifier.Text), "Strings")
                     .AddModifiers(
                         SyntaxFactory.Token(SyntaxKind.PublicKeyword),
                         SyntaxFactory.Token(SyntaxKind.StaticKeyword))

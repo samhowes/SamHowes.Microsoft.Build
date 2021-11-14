@@ -1,5 +1,5 @@
     public interface ICustomInterner
     {
-        string CharArrayToString(char[] candidate, int count);
-        string StringBuilderToString(StringBuilder candidate);
+        string WeakIntern(string str);
+        string WeakIntern(ReadOnlySpan<char> str);
     }

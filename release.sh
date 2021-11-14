@@ -3,9 +3,9 @@
 set -e
 if [[ ! -f .gitignore ]]; then echo >&2 "not at root"; exit 1; fi
 
-version="0.0.1"
-msbuild_version="16.9.0"
-msbuild_root="$(realpath "$(pwd)/../msbuild")"
+version="0.0.2"
+msbuild_version="17.0.0"
+msbuild_root="$(realpath "$(pwd)/_work/msbuild")"
 configuration="Release"
 artifacts=( "$msbuild_root/artifacts/packages/$configuration/Shipping/SamHowes.Microsoft.Build.$msbuild_version.nupkg" )
 
